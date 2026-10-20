@@ -1,0 +1,20 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# System / Core dumps
+gpucore.*
+core
+.DS_Store
+
+# Temporary outputs
+*.log
+index.json

@@ -1,0 +1,4 @@
+# Minimal dependencies for Simple Local RAG
+requests>=2.31.0
+pypdf>=5.0.0
+pyyaml>=6.0.0

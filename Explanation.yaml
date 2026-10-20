@@ -1,0 +1,308 @@
+rag_system_architecture:
+  title: "Under-The-Hood RAG: Zero Frameworks, Pure Python Mechanics"
+  philosophy:
+    framework_problem: |
+      Frameworks like LangChain and LlamaIndex wrap fundamental programming concepts
+      in multiple layers of indirection (Runnables, Chains, OutputParsers, DocumentLoaders,
+      VectorStoreIndex, Retrievers). While convenient for quick prototypes, they hide the
+      underlying mechanics: raw HTTP requests, string formatting, linear algebra, and token limits.
+    pure_python_solution: |
+      RAG is fundamentally 3 operations:
+        1. String processing (loading, chunking, formatting)
+        2. Vector math (computing dot products and Euclidean norms)
+        3. REST API calls (sending JSON payloads to Ollama/OpenAI endpoints)
+      No third-party orchestration framework is required. Everything runs transparently.
+
+lifecycle_states:
+  state_0_document_ingestion:
+    name: "Document Ingestion & Parsing"
+    source_file: "src/loader.py"
+    component: "DocumentLoader"
+    purpose: |
+      Transform unstructured raw files (.txt, .md, .pdf) from disk into structured
+      text and metadata tuples ready for downstream chunking.
+    langchain_comparison:
+      langchain_approach: |
+        from langchain_community.document_loaders import PyPDFLoader
+        loader = PyPDFLoader("manual.pdf")
+        docs = loader.load() # Wraps results in langchain_core.documents.Document
+      our_pure_python_approach: |
+        reader = pypdf.PdfReader(filepath)
+        for page_idx, page in enumerate(reader.pages, start=1):
+            text = page.extract_text()
+            # Stored as pure Python tuple: (raw_string, dict_metadata)
+      why_pure_is_better: |
+        Zero framework overhead. We directly access page-by-page text streams and attach
+        plain Python dictionary metadata ({source, page_number, total_pages}).
+    logic_reference:
+      step_1: "Inspect file extension (e.g. .pdf vs .txt)."
+      step_2: "If PDF, initialize binary stream reader using pypdf.PdfReader."
+      step_3: "Iterate through pages, extract UTF-8 text characters."
+      step_4: "Filter out empty/whitespace pages."
+      step_5: "Return list of tuples containing raw string and metadata dictionary."
+    syntax_reference:
+      input_type: "filepath: str"
+      output_type: "List[Tuple[str, Dict[str, Any]]]"
+      core_syntax: |
+        def load_pdf(filepath: str) -> List[Tuple[str, dict]]:
+            reader = PdfReader(filepath)
+            return [
+                (page.extract_text(), {"source": filepath, "page_number": idx})
+                for idx, page in enumerate(reader.pages, start=1)
+                if page.extract_text().strip()
+            ]
+
+  state_1_text_chunking:
+    name: "Semantic Text Chunking & Sliding Window"
+    source_file: "src/chunker.py"
+    component: "TextChunker"
+    purpose: |
+      Partition large continuous text into semantically coherent, bounded snippets
+      with overlapping boundaries so context is never severed across splits.
+    langchain_comparison:
+      langchain_approach: |
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+        chunks = splitter.split_text(text)
+      our_pure_python_approach: |
+        # Regex lookbehind on terminal punctuation (.!? or paragraph breaks \n\n)
+        raw_units = re.split(r"(?<=[.!?])\s+|\n\n+", text.strip())
+        # Accumulate sentences until threshold, sliding back overlap_length
+      why_pure_is_better: |
+        Instead of a generic character slicer that can chop sentences midway, our chunker
+        respects natural linguistic units (sentences/paragraphs) and uses a transparent
+        sliding window with trailing overlap.
+    logic_reference:
+      step_1: "Split document into sentence units using regex lookbehind `(?<=[.!?])\\s+|\\n\\n+`."
+      step_2: "Maintain an accumulator list `current_sentences` and character counter `current_len`."
+      step_3: "For each sentence, check if (current_len + sentence_len + 1) exceeds `chunk_size`."
+      step_4: "If exceeded, join accumulator sentences into a chunk and emit `Chunk` dataclass."
+      step_5: "Calculate overlap by reversing through accumulator and collecting trailing sentences up to `chunk_overlap`."
+      step_6: "Seed the next chunk with the trailing overlap sentences."
+    syntax_reference:
+      input_type: "text: str, source: str"
+      output_type: "List[Chunk] where Chunk = {text: str, chunk_id: int, source: str, metadata: dict}"
+      core_syntax: |
+        for sentence in sentences:
+            if current_sentences and (current_len + len(sentence) + 1 > self.chunk_size):
+                chunks.append(Chunk(text=" ".join(current_sentences), chunk_id=chunk_id))
+                chunk_id += 1
+                current_sentences = self._compute_overlap(current_sentences, self.chunk_overlap)
+            current_sentences.append(sentence)
+
+  state_2_vector_embeddings:
+    name: "Dense Semantic Vector Generation"
+    source_file: "src/embeddings.py"
+    component: "OllamaEmbedding / BaseEmbedding"
+    purpose: |
+      Convert human language strings into dense numerical vectors in a continuous geometric
+      hyperspace (384 dimensions for all-minilm). In this hyperspace, semantic similarity
+      corresponds to geometric alignment.
+    langchain_comparison:
+      langchain_approach: |
+        from langchain_community.embeddings import OllamaEmbeddings
+        embeddings = OllamaEmbeddings(model="all-minilm")
+        vec = embeddings.embed_query("query text")
+      our_pure_python_approach: |
+        response = requests.post(
+            "http://localhost:11434/api/embeddings",
+            json={"model": "all-minilm", "prompt": text},
+            timeout=60
+        )
+        vector = response.json()["embedding"] # Pure list of floats: [0.012, -0.045, ...]
+      why_pure_is_better: |
+        Direct REST interaction. You see the exact payload sent over HTTP, the exact endpoint,
+        and receive a clean Python list of floats without opaque wrappers.
+    logic_reference:
+      step_1: "Define abstract contract `BaseEmbedding` with method `embed_text(str) -> List[float]`."
+      step_2: "Send HTTP POST with JSON `{'model': model, 'prompt': text}` to `/api/embeddings`."
+      step_3: "The local transformer model tokenizes input, executes forward inference, and averages token activations."
+      step_4: "Extract raw float array from `response['embedding']`."
+      step_5: "Provide MockEmbedding fallback using MD5 hashing and unit norm scaling for offline testing."
+    syntax_reference:
+      input_type: "text: str"
+      output_type: "List[float] (Length: 384 for all-minilm)"
+      core_syntax: |
+        payload = {"model": self.model, "prompt": text}
+        response = requests.post(self.endpoint, json=payload, timeout=60)
+        return response.json()["embedding"]
+
+  state_3_vector_store_indexing:
+    name: "Vector Store Storage & Indexing"
+    source_file: "src/vector_store.py"
+    component: "VectorStore & VectorRecord"
+    purpose: |
+      Store text records alongside their calculated vector coordinates and document metadata.
+      Provide serialization/deserialization to disk without requiring external database servers.
+    langchain_comparison:
+      langchain_approach: |
+        from langchain_community.vectorstores import Chroma
+        db = Chroma.from_documents(docs, embeddings) # Pulls in Chroma, SQLite, ONNX, C++ bindings
+      our_pure_python_approach: |
+        store = VectorStore()
+        store.add(record_id, chunk_text, vector, metadata)
+        store.save("index.json") # Simple, clean JSON file
+      why_pure_is_better: |
+        ChromaDB or FAISS add 400MB+ dependencies, telemetry, and background threads.
+        Our VectorStore is 80 lines of pure Python, completely transparent, and persists to standard JSON.
+    logic_reference:
+      step_1: "Instantiate `VectorRecord` dataclass (id, text, embedding, metadata)."
+      step_2: "Append record to internal list `self.records`."
+      step_3: "On `save()`, dump dictionary representations directly via standard library `json.dump()`."
+      step_4: "On `load()`, read JSON and reconstruct `VectorRecord` instances."
+    syntax_reference:
+      input_type: "record_id: str, text: str, embedding: List[float], metadata: Dict"
+      output_type: "None (internal memory mutation)"
+      core_syntax: |
+        @dataclass
+        class VectorRecord:
+            record_id: str
+            text: str
+            embedding: List[float]
+            metadata: Dict[str, Any]
+
+        class VectorStore:
+            def __init__(self):
+                self.records: List[VectorRecord] = []
+
+  state_4_similarity_search_retrieval:
+    name: "Similarity Search & Nearest Neighbor Retrieval"
+    source_file: "src/vector_store.py"
+    component: "cosine_similarity & VectorStore.search"
+    purpose: |
+      Given a user query vector, rank all stored document chunks by semantic relevance
+      and return the top-K highest-scoring candidates.
+    mathematical_formulation:
+      formula: "Cosine Similarity = (A · B) / (||A|| * ||B||)"
+      dot_product: "A · B = sum(A_i * B_i) for i in 1..n"
+      euclidean_norm: "||A|| = sqrt(sum(A_i^2))"
+      why_cosine_over_euclidean: |
+        Cosine similarity measures angular direction rather than absolute distance.
+        A 20-word chunk and a 100-word chunk discussing the same subject produce different
+        vector lengths, but point in the same direction. Cosine normalizes magnitude to 1.0.
+    langchain_comparison:
+      langchain_approach: |
+        retriever = db.as_retriever(search_kwargs={"k": 2})
+        matched_docs = retriever.invoke(query)
+      our_pure_python_approach: |
+        scores = [(rec, cosine_similarity(query_vec, rec.embedding)) for rec in self.records]
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores[:top_k]
+      why_pure_is_better: |
+        You see the exact linear algebra calculation without any black-box abstraction.
+        The score is an explicit float between -1.0 and 1.0.
+    logic_reference:
+      step_1: "Compute query embedding vector `query_vec = embedding_model.embed_text(query)`."
+      step_2: "Iterate through every `record` in `vector_store.records`."
+      step_3: "Calculate dot product: `sum(q * d for q, d in zip(query_vec, record.embedding))`."
+      step_4: "Calculate norms: `sqrt(sum(x^2))` for both vectors."
+      step_5: "Divide dot product by product of norms (safe against zero division)."
+      step_6: "Sort all pairs by score descending and slice `[:top_k]`."
+    syntax_reference:
+      input_type: "query_embedding: List[float], top_k: int"
+      output_type: "List[Tuple[VectorRecord, float]]"
+      core_syntax: |
+        def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+            dot = sum(a * b for a, b in zip(vec_a, vec_b))
+            norm_a = math.sqrt(sum(a * a for a in vec_a))
+            norm_b = math.sqrt(sum(b * b for b in vec_b))
+            return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+  state_5_prompt_augmentation:
+    name: "Context Augmentation & Prompt Engineering"
+    source_file: "src/pipeline.py"
+    component: "RAGPipeline.build_prompt"
+    purpose: |
+      Assemble a structured prompt that injects the retrieved context snippets, source citations,
+      and user question into a format the LLM can easily ground its reasoning upon.
+    langchain_comparison:
+      langchain_approach: |
+        from langchain.chains import create_retrieval_chain
+        from langchain_core.prompts import ChatPromptTemplate
+        # Involves prompt templates, input variables, output parsers, and LCEL pipe operators (|)
+      our_pure_python_approach: |
+        context_blocks = [
+            f"[Document {rank} | Source: {rec.metadata['source']} | Relevance: {score:.4f}]\n{rec.text}"
+            for rank, (rec, score) in enumerate(retrieved_chunks, start=1)
+        ]
+        prompt = f"Context Information:\n{chr(10).join(context_blocks)}\n\nQuestion: {query}\n\nAnswer:"
+      why_pure_is_better: |
+        Standard Python f-strings replace 5 layers of LCEL (LangChain Expression Language)
+        runnables. You can inspect and debug the exact string sent to the model.
+    logic_reference:
+      step_1: "Iterate through retrieved records with their rank and similarity scores."
+      step_2: "Extract metadata (file source, page number if available)."
+      step_3: "Format each chunk into a distinct, delimited context document block."
+      step_4: "Concatenate all blocks with clear separators."
+      step_5: "Append the user's question and an explicit 'Answer:' trigger."
+    syntax_reference:
+      input_type: "query: str, results: List[Tuple[VectorRecord, float]]"
+      output_type: "str (augmented prompt string)"
+      core_syntax: |
+        def build_prompt(self, query: str, results: List[Any]) -> str:
+            blocks = []
+            for rank, (record, score) in enumerate(results, start=1):
+                page = f" (Page {record.metadata['page_number']})" if "page_number" in record.metadata else ""
+                blocks.append(f"[{rank}] [Source: {record.metadata['source']}{page} | Score: {score:.4f}]\n{record.text}")
+            return f"Context:\n" + "\n\n".join(blocks) + f"\n\nQuestion: {query}\n\nAnswer:"
+
+  state_6_llm_generation_and_grounding:
+    name: "Grounded LLM Generation & Hallucination Defense"
+    source_file: "src/llm.py"
+    component: "OllamaLLM / BaseLLM"
+    purpose: |
+      Execute autoregressive transformer generation with low temperature (0.2) and a strict
+      system prompt ensuring the model only generates facts present in the retrieved context.
+    system_prompt_guardrail: |
+      "You are a helpful and precise assistant. Answer the user's question using ONLY
+      the provided context snippets. If the answer cannot be found in the context, clearly
+      state: 'I cannot answer this based on the provided context.' Do not make assumptions
+      or extrapolate beyond what is explicitly stated in the context."
+    langchain_comparison:
+      langchain_approach: |
+        from langchain_community.llms import Ollama
+        llm = Ollama(model="qwen2.5-coder:3b")
+        chain = retrieval_chain | llm | StrOutputParser()
+        answer = chain.invoke({"input": query})
+      our_pure_python_approach: |
+        payload = {
+            "model": "qwen2.5-coder:3b",
+            "prompt": augmented_prompt,
+            "system": system_prompt,
+            "stream": False,
+            "options": {"temperature": 0.2}
+        }
+        res = requests.post("http://localhost:11434/api/generate", json=payload)
+        return res.json()["response"].strip()
+      why_pure_is_better: |
+        Zero chain abstractions. Direct HTTP call with explicit temperature control and system prompt.
+        If generation fails, error handling points directly to server connectivity.
+    logic_reference:
+      step_1: "Construct JSON payload containing model name, augmented prompt, system prompt, and temperature."
+      step_2: "Send POST request to local Ollama instance on port 11434."
+      step_3: "The LLM (qwen2.5-coder:3b) evaluates context tokens and generates continuation."
+      step_4: "Temperature=0.2 keeps generation greedy and factual, suppressing creative hallucination."
+      step_5: "Return parsed response string directly to the user."
+    syntax_reference:
+      input_type: "prompt: str, system_prompt: Optional[str]"
+      output_type: "str (generated answer)"
+      core_syntax: |
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "system": system_prompt,
+            "stream": False,
+            "options": {"temperature": self.temperature}
+        }
+        response = requests.post(self.endpoint, json=payload, timeout=120)
+        return response.json()["response"].strip()
+
+end_to_end_data_flow_summary:
+  step_1: "File path ('manual.pdf') -> DocumentLoader -> List[(text, metadata)]"
+  step_2: "List[(text, metadata)] -> TextChunker -> List[Chunk]"
+  step_3: "Chunk.text -> OllamaEmbedding.embed_text() -> 384-dim float vector"
+  step_4: "(Chunk, vector) -> VectorStore.add() -> Indexed in memory"
+  step_5: "User query -> OllamaEmbedding.embed_text() -> query_vector"
+  step_6: "query_vector -> VectorStore.search() -> Top-K (VectorRecord, cosine_score)"
+  step_7: "(query, Top-K records) -> RAGPipeline.build_prompt() -> Augmented prompt string"
+  step_8: "Augmented prompt -> OllamaLLM.generate() -> Factually grounded answer string"
